@@ -67,6 +67,12 @@ def sync_readonly(provider: ReadOnlyMailProvider, db: sqlite3.Connection, max_pa
     else:raise ValueError('Provider exceeded maximum pages; checkpoint was saved for safe continuation')
     return total
 
+def sync_gmail(credentials_path: Path, token_path: Path, db: sqlite3.Connection,
+               query: str = 'in:inbox', max_pages: int = 10) -> int:
+    from gmail_provider import GmailProvider, authorize_gmail
+    service=authorize_gmail(credentials_path,token_path)
+    return sync_readonly(GmailProvider(service,query=query),db,max_pages=max_pages)
+
 def suggest_reply(message_id: int, db: sqlite3.Connection) -> str:
     row=db.execute('SELECT subject FROM messages WHERE id=?',(message_id,)).fetchone()
     if row is None:raise ValueError('Message not found')
@@ -100,6 +106,11 @@ def main() -> None:
     d=sub.add_parser('draft'); d.add_argument('message_id',type=int); d.add_argument('text',nargs='?'); d.add_argument('--suggest',action='store_true')
     x=sub.add_parser('export'); x.add_argument('file',type=Path)
     rm=sub.add_parser('delete'); rm.add_argument('message_id',type=int); rm.add_argument('--confirm',action='store_true')
+    g=sub.add_parser('sync-gmail',help='Read messages from Gmail using local, read-only OAuth')
+    g.add_argument('--credentials',type=Path,default=Path.home()/'.config/inbox-autopilot/credentials.json')
+    g.add_argument('--token',type=Path,default=Path.home()/'.config/inbox-autopilot/token.json')
+    g.add_argument('--query',default='in:inbox',help='Gmail search query (default: in:inbox)')
+    g.add_argument('--max-pages',type=int,default=10,help='Maximum pages per run (100 messages per page)')
     a=p.parse_args(); db=connect(a.db)
     if a.cmd=='import':
         mid,new=import_eml(a.file,db); print(json.dumps({'id':mid,'imported':new},ensure_ascii=False))
@@ -126,5 +137,10 @@ def main() -> None:
         with a.file.open('w',encoding='utf-8',newline='') as f:
             w=csv.DictWriter(f,fieldnames=rows[0].keys() if rows else ['id','message_id','sender','subject','sent_at','body']);w.writeheader();w.writerows(map(dict,rows))
         print(f'Exported {len(rows)} message(s).')
+    elif a.cmd=='sync-gmail':
+        if a.max_pages < 1: p.error('--max-pages must be positive')
+        try: total=sync_gmail(a.credentials,a.token,db,a.query,a.max_pages)
+        except (FileNotFoundError,ValueError,RuntimeError) as exc: p.error(str(exc))
+        print(json.dumps({'provider':'gmail','messages_seen':total,'query':a.query},ensure_ascii=False))
     db.close()
 if __name__=='__main__': main()
