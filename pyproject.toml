@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inbox-autopilot"
+version = "0.1.0"
+description = "Offline .eml inbox organizer with local action items and drafts"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+inbox-autopilot = "app:main"
+
+[tool.setuptools]
+py-modules = ["app", "migrations"]
+
+[tool.ruff]
+line-length = 100
