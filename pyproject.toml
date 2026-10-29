@@ -14,6 +14,7 @@ gmail = [
     "google-api-python-client>=2,<3",
     "google-auth-oauthlib>=1,<2",
 ]
+dev = ["ruff>=0.17,<1"]
 
 [project.scripts]
 inbox-autopilot = "app:main"

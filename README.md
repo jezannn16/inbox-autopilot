@@ -109,11 +109,12 @@ The diagram shows the implemented path: OAuth and Gmail reads happen only after 
 
 ## Development
 
-Run the offline and mocked provider tests and Ruff locally:
+Install the development extra, then run the offline and mocked provider tests and Ruff:
 
 ```sh
+.venv/bin/python -m pip install -e '.[dev]'
 .venv/bin/python -m unittest discover -v
-ruff check .
+.venv/bin/ruff check .
 ```
 
 CI runs those checks on Python 3.11 and 3.13. The Gmail adapter tests use a synthetic RFC 822 fixture and a fake API service; no Google account or live credentials are needed for CI.
