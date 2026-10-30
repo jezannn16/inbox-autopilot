@@ -97,10 +97,25 @@ def sync_gmail_imap(db: sqlite3.Connection, username: str | None = None,
     return total, provider.skipped_oversize
 
 def suggest_reply(message_id: int, db: sqlite3.Connection) -> str:
-    row=db.execute('SELECT subject FROM messages WHERE id=?',(message_id,)).fetchone()
+    row=db.execute('SELECT sender,subject,body FROM messages WHERE id=?',(message_id,)).fetchone()
     if row is None:raise ValueError('Message not found')
     subject=(row['subject'] or 'your message').replace('\n',' ')[:200]
-    return f"Thank you for your message about {subject}. I will review it and follow up. Please review and edit this draft before use."
+    excerpt=next((part.strip() for part in re.split(r'(?<=[.!?。！？])\s+|\n+',row['body']) if len(part.strip())>=8), '')[:240]
+    if re.search(r'[А-Яа-яЁё]',subject+' '+excerpt):
+        context=f' По вопросу: «{excerpt}».' if excerpt else ''
+        return f'Спасибо за письмо о теме «{subject}». Я понял(а), что вы пишете{context} Я проверю информацию и подготовлю ответ. Проверьте и отредактируйте этот черновик перед использованием.'
+    context=f' I understand your note about: “{excerpt}”.' if excerpt else ''
+    return f"Thank you for your message about {subject}.{context} I will review the details and prepare a response. Please review and edit this draft before use."
+
+def summarize_message(message_id: int, db: sqlite3.Connection) -> dict:
+    """Return a bounded extractive summary; never infer promises or deadlines."""
+    row=db.execute('SELECT id,subject,sender,body,thread_key FROM messages WHERE id=?',(message_id,)).fetchone()
+    if row is None:raise ValueError('Message not found')
+    sentences=[part.strip() for part in re.split(r'(?<=[.!?。！？])\s+|\n+',row['body']) if part.strip()]
+    actions=[dict(item) for item in db.execute('SELECT id,action,owner,due_date,evidence FROM action_items WHERE message_id=? ORDER BY id',(message_id,))]
+    return {'message_id':row['id'],'thread_key':row['thread_key'],'subject':row['subject'],'sender':row['sender'],
+            'summary':' '.join(sentences[:2])[:500], 'explicit_actions':actions,
+            'note':'Extractive summary only; no unmarked promises, owners, or dates are inferred.'}
 
 # Deterministic baseline: only extract explicit action language; never infer a person/date.
 ACTION_RE=re.compile(r'(?im)^\s*(?:[-*•]\s*)?(?:please\s+)?(?:todo|action|нужно|надо|пожалуйста|прошу|задача)\s*:?\s*(.{5,240})$')
@@ -151,6 +166,8 @@ def main() -> None:
     i=sub.add_parser('import'); i.add_argument('file',type=Path)
     l=sub.add_parser('list'); l.add_argument('--query',default='')
     e=sub.add_parser('extract'); e.add_argument('message_id',type=int)
+    sm=sub.add_parser('summary',help='Show an extractive summary and explicitly recorded actions')
+    sm.add_argument('message_id',type=int)
     ac=sub.add_parser('action-add',help='Save a reviewed action linked to a source message')
     ac.add_argument('message_id',type=int); ac.add_argument('action'); ac.add_argument('--owner'); ac.add_argument('--due'); ac.add_argument('--evidence',default='')
     al=sub.add_parser('actions'); al.add_argument('--message-id',type=int)
@@ -179,6 +196,8 @@ def main() -> None:
         print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
     elif a.cmd=='extract':
         extract_actions(a.message_id,db); print(json.dumps([dict(r) for r in db.execute('SELECT * FROM action_items WHERE message_id=?',(a.message_id,))],ensure_ascii=False,indent=2))
+    elif a.cmd=='summary':
+        print(json.dumps(summarize_message(a.message_id,db),ensure_ascii=False,indent=2))
     elif a.cmd=='action-add':
         action_id,created=add_action_item(a.message_id,a.action,db,a.owner,a.due,a.evidence)
         print(json.dumps({'id':action_id,'created':created,'source_message_id':a.message_id},ensure_ascii=False))

@@ -39,12 +39,13 @@ Try the checked-in synthetic email. The database is created beside the command u
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 list --query project
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 extract 1
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 actions
+.venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 summary 1
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 draft 1 --suggest
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 drafts
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 export /tmp/inbox-export.json --format json
 ```
 
-The fixture has a `TODO:` line with an explicit owner and due date. Importing the same file again reports `imported: false`. Drafts stay in the local database.
+The fixture has a `TODO:` line with an explicit owner and due date. Importing the same file again reports `imported: false`. `summary` gives an extractive message summary and already-recorded explicit actions. Suggested drafts include a short excerpt from the source in English or Russian and remain local for human review.
 
 ## Gmail setup
 
@@ -139,6 +140,7 @@ For a human-reviewed action, use `action-add MESSAGE_ID 'Action' --owner 'Name' 
 - The OAuth refresh token is a credential. Keep `credentials.json` and `token.json` outside Git, restrict access to your account, and revoke the app's Google Account access when it is no longer needed.
 - Google can revoke App passwords when the account password changes; eligibility depends on account security settings and Workspace policy. If Google does not offer App passwords, use the API OAuth route or continue with `.eml` imports.
 - Action extraction is deterministic and should be checked against its source message.
+- Message summaries and suggested replies are extractive templates, not generated or verified answers. Check the full source before using a draft.
 
 ## Development
 
