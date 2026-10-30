@@ -16,7 +16,7 @@ class _HTMLTextExtractor(HTMLParser):
     _SKIP = {'script', 'style', 'head', 'noscript', 'template'}
     _BLOCK = {'address', 'article', 'blockquote', 'br', 'dd', 'div', 'dl', 'dt', 'h1', 'h2',
               'h3', 'h4', 'h5', 'h6', 'hr', 'li', 'main', 'ol', 'p', 'pre', 'section', 'table',
-              'tr', 'ul'}
+              'td', 'th', 'tr', 'ul'}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
@@ -64,22 +64,35 @@ def parse_eml(raw: bytes) -> dict:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     body_parts=[]
     html_parts=[]
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_disposition() == 'attachment':
-                continue
-            if part.get_content_type() == 'text/plain':
-                try: body_parts.append(part.get_content())
-                except (LookupError, UnicodeDecodeError): pass
-            elif part.get_content_type() == 'text/html':
-                try: html_parts.append(part.get_content())
-                except (LookupError, UnicodeDecodeError): pass
-    elif msg.get_content_type() == 'text/plain':
-        try: body_parts.append(msg.get_content())
-        except (LookupError, UnicodeDecodeError): pass
-    elif msg.get_content_type() == 'text/html':
-        try: html_parts.append(msg.get_content())
-        except (LookupError, UnicodeDecodeError): pass
+
+    def collect_body(part):
+        # Do not descend into an attached message/container: walk() would still
+        # yield its text children and leak attachment content into the body.
+        if part.get_content_disposition() == 'attachment' or part.get_filename():
+            return
+        if part.is_multipart():
+            children=list(part.iter_parts())
+            if part.get_content_subtype() == 'related' and children:
+                start=part.get_param('start')
+                if start:
+                    target=start.strip().strip('<>')
+                    root=next((child for child in children
+                               if str(child.get('Content-ID') or '').strip().strip('<>') == target), children[0])
+                else:
+                    root=children[0]
+                collect_body(root)
+            else:
+                for child in children:
+                    collect_body(child)
+            return
+        if part.get_content_type() == 'text/plain':
+            try: body_parts.append(part.get_content())
+            except (LookupError, UnicodeDecodeError): pass
+        elif part.get_content_type() == 'text/html':
+            try: html_parts.append(part.get_content())
+            except (LookupError, UnicodeDecodeError): pass
+
+    collect_body(msg)
     if not body_parts:
         body_parts=[html_to_text(str(part)) for part in html_parts]
     body='\n'.join(str(x) for x in body_parts).strip()

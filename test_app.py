@@ -35,6 +35,34 @@ class InboxTests(unittest.TestCase):
   self.assertIn('Plain version',body)
   self.assertNotIn('HTML version',body)
   self.assertNotIn('Attachment content',body)
+ def test_nested_multipart_attachment_subtree_and_named_text_part_are_excluded(self):
+  raw=(b'From: sender@example.test\nSubject: Nested attachment\nMIME-Version: 1.0\n'
+       b'Content-Type: multipart/mixed; boundary="outer"\n\n'
+       b'--outer\nContent-Type: multipart/alternative; boundary="body"\n\n'
+       b'--body\nContent-Type: text/plain; charset=utf-8\n\nVisible body\n--body--\n'
+       b'--outer\nContent-Type: multipart/alternative; boundary="attached"\n'
+       b'Content-Disposition: attachment; filename="forwarded.eml"\n\n'
+       b'--attached\nContent-Type: text/plain; charset=utf-8\n\nPRIVATE ATTACHMENT TEXT\n'
+       b'--attached\nContent-Type: text/html; charset=utf-8\n\n<p>PRIVATE ATTACHMENT HTML</p>\n'
+       b'--attached--\n--outer\nContent-Type: text/plain; name="notes.txt"\n\nNAMED ATTACHMENT\n--outer--\n')
+  body=app.parse_eml(raw)['body']
+  self.assertIn('Visible body',body)
+  self.assertNotIn('PRIVATE ATTACHMENT',body)
+  self.assertNotIn('NAMED ATTACHMENT',body)
+ def test_related_html_uses_declared_root_not_text_resource(self):
+  raw=(b'MIME-Version: 1.0\nContent-Type: multipart/related; boundary="r"; start="<root>"\n\n'
+       b'--r\nContent-Type: text/plain; charset=utf-8\nContent-ID: <resource>\n\nUnrelated resource text\n'
+       b'--r\nContent-Type: text/html; charset=utf-8\nContent-ID: <root>\n\n<p>Root message</p>\n--r--\n')
+  body=app.parse_eml(raw)['body']
+  self.assertEqual(body,'Root message')
+  self.assertNotIn('Unrelated resource',body)
+ def test_html_encoding_whitespace_and_table_cells_are_preserved_readably(self):
+  text='<p>  Привет&nbsp;   мир </p><table><tr><td>Первая</td><td>Вторая</td></tr></table>'
+  raw=('Content-Type: text/html; charset=windows-1251\n\n'+text).encode('windows-1251')
+  body=app.parse_eml(raw)['body']
+  self.assertIn('Привет мир',body)
+  self.assertEqual([line for line in body.splitlines() if line],['Привет мир','Первая','Вторая'])
+  self.assertNotIn('   ',body)
  def test_extract_actions_russian_english_and_untrusted_text_without_guessing(self):
   with tempfile.TemporaryDirectory() as td:
    db=app.connect(Path(td)/'mail.db')
