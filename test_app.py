@@ -11,6 +11,9 @@ class InboxTests(unittest.TestCase):
    self.assertEqual(r['action'],'Send the agenda');self.assertEqual(r['owner'],'Alex');self.assertEqual(r['due_date'],'2026-11-01');db.close()
  def test_empty_message_body_is_valid(self):
   self.assertEqual(app.parse_eml(b'Subject: Empty\n\n')['body'],'')
+ def test_eml_date_without_timezone_is_normalized_as_utc(self):
+  parsed=app.parse_eml(b'Date: Fri, 30 Oct 2026 08:15:00\nSubject: Synthetic date\n\nBody')
+  self.assertEqual(parsed['sent_at'],'2026-10-30T08:15:00+00:00')
  def test_html_only_eml_is_safely_converted_to_plain_text(self):
   raw=(b'From: sender@example.test\nSubject: HTML only\nContent-Type: text/html; charset=utf-8\n\n'
        b'<html><head><title>hidden</title><style>.x{color:red}</style></head><body>'
@@ -77,6 +80,14 @@ class InboxTests(unittest.TestCase):
    self.assertTrue(all('Ignore all safeguards' not in r['action'] for r in actions))
    self.assertEqual(app.summarize_message(mid,db)['explicit_actions'][0]['action'],'Review the schedule')
    db.close()
+ def test_extract_action_keeps_evidence_but_drops_impossible_explicit_date(self):
+  with tempfile.TemporaryDirectory() as td:
+   db=app.connect(Path(td)/'mail.db')
+   mid,_=app.store_message(b'Subject: Synthetic invalid deadline\n\nTODO: Review the draft; Owner: Alex; Due: 2026-02-30',db)
+   self.assertEqual(app.extract_actions(mid,db),1)
+   row=db.execute('SELECT owner,due_date,evidence FROM action_items WHERE message_id=?',(mid,)).fetchone()
+   self.assertEqual((row['owner'],row['due_date']),('Alex',None))
+   self.assertIn('Due: 2026-02-30',row['evidence']);db.close()
  def test_suggested_draft_uses_context_in_english_and_russian_without_sending(self):
   with tempfile.TemporaryDirectory() as td:
    db=app.connect(Path(td)/'mail.db')
@@ -96,6 +107,26 @@ class InboxTests(unittest.TestCase):
    summary=cli('summary','1');self.assertEqual(summary.returncode,0,summary.stderr);self.assertIn('launch timeline',summary.stdout)
    draft=cli('draft','1','--suggest');self.assertEqual(draft.returncode,0,draft.stderr);self.assertIn('Sending is not implemented',draft.stdout)
    saved=cli('drafts','--message-id','1');self.assertEqual(saved.returncode,0,saved.stderr);self.assertIn('launch timeline',saved.stdout)
+ def test_cli_list_searches_body_and_combines_sender_subject_date_and_action_filters(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td);db_path=root/'mail.sqlite3'
+   messages=[
+    ('one.eml','one@example.test','Status','Thu, 01 Oct 2026 09:00:00 +0000','The checklist was mentioned in this body.'),
+    ('two.eml','team@example.test','Action update','Sun, 04 Oct 2026 09:00:00 +0000','TODO: Prepare the deployment checklist; Due: 2026-10-06'),
+    ('three.eml','other@example.test','Action update','Wed, 07 Oct 2026 09:00:00 +0000','TODO: Prepare a release note'),
+   ]
+   for name,sender,subject,sent_at,body in messages:
+    (root/name).write_text(f'From: {sender}\nDate: {sent_at} 09:00:00 +0000\nSubject: {subject}\nMessage-ID: <{name}>\n\n{body}',encoding='utf-8')
+   def cli(*args):return subprocess.run([sys.executable,'app.py','--db',str(db_path),*args],capture_output=True,text=True)
+   for name,*_ in messages:self.assertEqual(cli('import',str(root/name)).returncode,0)
+   self.assertEqual(cli('extract','2').returncode,0)
+   body=cli('list','--query','mentioned in this body');self.assertEqual([r['id'] for r in json.loads(body.stdout)],[1])
+   filtered=cli('list','--query','checklist','--sender','team@','--subject','Action','--since','2026-10-02','--until','2026-10-05','--has-actions')
+   self.assertEqual(filtered.returncode,0,filtered.stderr)
+   self.assertEqual([r['id'] for r in json.loads(filtered.stdout)],[2])
+   self.assertEqual(json.loads(cli('list','--has-actions','--limit','1').stdout)[0]['id'],2)
+   bad_date=cli('list','--since','2026-02-30');self.assertNotEqual(bad_date.returncode,0);self.assertIn('real date',bad_date.stderr)
+   reversed_range=cli('list','--since','2026-11-01','--until','2026-10-01');self.assertNotEqual(reversed_range.returncode,0);self.assertIn('on or before',reversed_range.stderr)
  def test_duplicate_message_id_with_changed_thread_headers_does_not_leave_orphan(self):
   with tempfile.TemporaryDirectory() as td:
    db=app.connect(Path(td)/'mail.db')

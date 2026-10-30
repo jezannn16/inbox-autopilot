@@ -4,7 +4,7 @@ import argparse, csv, email, email.policy, hashlib, json, re, sqlite3
 from html.parser import HTMLParser
 from typing import Protocol, Sequence
 from migrations import connect as connect_db
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -98,7 +98,10 @@ def parse_eml(raw: bytes) -> dict:
     body='\n'.join(str(x) for x in body_parts).strip()
     date=''
     if msg.get('Date'):
-        try: date=parsedate_to_datetime(str(msg['Date'])).astimezone(timezone.utc).isoformat()
+        try:
+            parsed_date=parsedate_to_datetime(str(msg['Date']))
+            if parsed_date.tzinfo is None:parsed_date=parsed_date.replace(tzinfo=timezone.utc)
+            date=parsed_date.astimezone(timezone.utc).isoformat()
         except (TypeError, ValueError, OverflowError): pass
     mid=str(msg.get('Message-ID') or '').strip()
     return {'message_id':mid or None, 'fingerprint':hashlib.sha256((str(msg.get('From',''))+'\0'+str(msg.get('Subject',''))+'\0'+body).encode()).hexdigest(), 'sender':str(msg.get('From',''))[:500], 'subject':str(msg.get('Subject',''))[:1000], 'sent_at':date, 'body':body, 'in_reply_to':str(msg.get('In-Reply-To') or '').strip() or None, 'references':str(msg.get('References') or '').strip(), 'headers_json':json.dumps({'reply_to':str(msg.get('Reply-To') or '')})}
@@ -198,9 +201,13 @@ def extract_actions(message_id: int, db: sqlite3.Connection) -> int:
     for m in ACTION_RE.finditer(row['body']):
         evidence=m.group(0).strip()[:300]; action=m.group(1).strip()
         owner=OWNER_RE.search(evidence); due=DATE_RE.search(evidence)
+        due_date=due.group(1) if due else None
+        if due_date:
+            try:date.fromisoformat(due_date)
+            except ValueError:due_date=None
         action=re.sub(r'(?i)[;, ]*\b(?:owner|владелец)\s*[:=].*$','',action).strip(' ;,')
         action=re.sub(r'(?i)[;, ]*\b(?:due|срок|дедлайн)\s*[:=].*$','',action).strip(' ;,')
-        db.execute('INSERT OR IGNORE INTO action_items(message_id,action,owner,due_date,confidence,evidence) VALUES(?,?,?,?,?,?)',(message_id,action,owner.group(1).strip() if owner else None,due.group(1) if due else None,0.85,evidence))
+        db.execute('INSERT OR IGNORE INTO action_items(message_id,action,owner,due_date,confidence,evidence) VALUES(?,?,?,?,?,?)',(message_id,action,owner.group(1).strip() if owner else None,due_date,0.85,evidence))
         count+=1
     db.commit(); return count
 
@@ -217,7 +224,7 @@ def add_action_item(message_id: int, action: str, db: sqlite3.Connection,
         raise ValueError('Owner must contain 1–100 characters when provided')
     if due_date is not None:
         try:
-            due_date = datetime.strptime(due_date, '%Y-%m-%d').date().isoformat()
+            due_date = date.fromisoformat(due_date).isoformat()
         except ValueError:
             raise ValueError('Due date must be a real date in YYYY-MM-DD format') from None
     evidence = evidence.strip()[:1000]
@@ -230,11 +237,39 @@ def add_action_item(message_id: int, action: str, db: sqlite3.Connection,
     db.commit()
     return int(row['id']), cur.rowcount == 1
 
+def search_messages(db:sqlite3.Connection,query:str='',sender:str='',subject:str='',
+                    since:str|None=None,until:str|None=None,has_actions:bool=False,
+                    limit:int=50)->list[sqlite3.Row]:
+    if not 1<=limit<=500:raise ValueError('Result limit must be between 1 and 500')
+    parsed_dates={}
+    for name,value in (('since',since),('until',until)):
+        if value:
+            try:parsed_dates[name]=date.fromisoformat(value).isoformat()
+            except ValueError:raise ValueError(f'{name} date must be a real date in YYYY-MM-DD format') from None
+    if parsed_dates.get('since') and parsed_dates.get('until') and parsed_dates['since']>parsed_dates['until']:
+        raise ValueError('since date must be on or before until date')
+    where=[];params=[]
+    if query:
+        where.append('(m.subject LIKE ? OR m.sender LIKE ? OR m.body LIKE ? OR COALESCE(m.message_id,\'\') LIKE ?)')
+        params.extend([f'%{query}%']*4)
+    if sender:where.append('m.sender LIKE ?');params.append(f'%{sender}%')
+    if subject:where.append('m.subject LIKE ?');params.append(f'%{subject}%')
+    if since:where.append("date(substr(m.sent_at,1,10))>=date(?)");params.append(parsed_dates['since'])
+    if until:where.append("date(substr(m.sent_at,1,10))<=date(?)");params.append(parsed_dates['until'])
+    if has_actions:where.append('EXISTS (SELECT 1 FROM action_items a WHERE a.message_id=m.id)')
+    sql='SELECT m.id,m.sender,m.subject,m.sent_at FROM messages m'
+    if where:sql+=' WHERE '+' AND '.join(where)
+    sql+=' ORDER BY m.id DESC LIMIT ?';params.append(limit)
+    return list(db.execute(sql,params))
+
 def main() -> None:
     p=argparse.ArgumentParser(description='Local .eml inbox organizer (read-only; no sending)')
     p.add_argument('--db',type=Path,default=DB); sub=p.add_subparsers(dest='cmd',required=True)
     i=sub.add_parser('import'); i.add_argument('file',type=Path)
-    l=sub.add_parser('list'); l.add_argument('--query',default='')
+    l=sub.add_parser('list'); l.add_argument('--query',default='',help='Search sender, subject, body text, or Message-ID')
+    l.add_argument('--sender',default='');l.add_argument('--subject',default='')
+    l.add_argument('--since');l.add_argument('--until');l.add_argument('--has-actions',action='store_true')
+    l.add_argument('--limit',type=int,default=50)
     e=sub.add_parser('extract'); e.add_argument('message_id',type=int)
     sm=sub.add_parser('summary',help='Show an extractive summary and explicitly recorded actions')
     sm.add_argument('message_id',type=int)
@@ -262,7 +297,8 @@ def main() -> None:
     if a.cmd=='import':
         mid,new=import_eml(a.file,db); print(json.dumps({'id':mid,'imported':new},ensure_ascii=False))
     elif a.cmd=='list':
-        rows=db.execute('SELECT id,sender,subject,sent_at FROM messages WHERE subject LIKE ? OR sender LIKE ? ORDER BY id DESC', (f'%{a.query}%',f'%{a.query}%')).fetchall()
+        try:rows=search_messages(db,a.query,a.sender,a.subject,a.since,a.until,a.has_actions,a.limit)
+        except ValueError as exc:p.error(str(exc))
         print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
     elif a.cmd=='extract':
         extract_actions(a.message_id,db); print(json.dumps([dict(r) for r in db.execute('SELECT * FROM action_items WHERE message_id=?',(a.message_id,))],ensure_ascii=False,indent=2))

@@ -38,6 +38,7 @@ Try the checked-in synthetic email. The database is created beside the command u
 ```sh
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 import fixtures/sample.eml
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 list --query project
+.venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 list --query timeline --sender example.test --since 2026-10-01 --has-actions
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 extract 1
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 actions
 .venv/bin/python app.py --db /tmp/inbox-demo.sqlite3 summary 1
@@ -47,6 +48,8 @@ Try the checked-in synthetic email. The database is created beside the command u
 ```
 
 The fixture has a `TODO:` line with an explicit owner and due date. Importing the same file again reports `imported: false`. `summary` gives an extractive message summary and already-recorded explicit actions. Suggested drafts include a short excerpt from the source in English or Russian and remain local for human review.
+
+`list` searches message body, sender, subject, and Message-ID. Combine `--sender`, `--subject`, inclusive `--since YYYY-MM-DD` / `--until YYYY-MM-DD`, `--has-actions`, and `--limit` (1–500) to narrow results. A mail `Date` header without an offset is interpreted as UTC; absent or malformed dates remain empty. Extracted due dates are recorded only when they form a real calendar date; the original evidence remains visible even when a stated date is invalid.
 
 ## Gmail setup
 
@@ -140,7 +143,7 @@ For a human-reviewed action, use `action-add MESSAGE_ID 'Action' --owner 'Name' 
 - Gmail sync is explicit and read-only. The IMAP app password is not stored in SQLite, but it grants the broader IMAP access Google documents; the adapter uses read-only mailbox selection and `BODY.PEEK`. There is no automatic background sync, LLM, or sending feature.
 - The OAuth refresh token is a credential. Keep `credentials.json` and `token.json` outside Git, restrict access to your account, and revoke the app's Google Account access when it is no longer needed.
 - Google can revoke App passwords when the account password changes; eligibility depends on account security settings and Workspace policy. If Google does not offer App passwords, use the API OAuth route or continue with `.eml` imports.
-- Action extraction is deterministic and should be checked against its source message.
+- Action extraction is deterministic and should be checked against its source message. Impossible stated dates are retained in evidence but not stored as due dates.
 - Message summaries and suggested replies are extractive templates, not generated or verified answers. Check the full source before using a draft.
 
 ## Development
