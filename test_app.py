@@ -1,4 +1,4 @@
-import tempfile,unittest
+import tempfile,unittest,json,subprocess,sys
 from pathlib import Path
 import app
 class InboxTests(unittest.TestCase):
@@ -11,6 +11,28 @@ class InboxTests(unittest.TestCase):
    self.assertEqual(r['action'],'Send the agenda');self.assertEqual(r['owner'],'Alex');self.assertEqual(r['due_date'],'2026-11-01');db.close()
  def test_empty_message_body_is_valid(self):
   self.assertEqual(app.parse_eml(b'Subject: Empty\n\n')['body'],'')
+ def test_manual_action_is_validated_deduplicated_and_keeps_source(self):
+  with tempfile.TemporaryDirectory() as td:
+   f=Path(td)/'mail.eml';f.write_text('From: a@example.test\nSubject: Review\n\nPlease review this.',encoding='utf-8')
+   db=app.connect(Path(td)/'mail.db');mid,_=app.import_eml(f,db)
+   aid,created=app.add_action_item(mid,'Review the proposal',db,owner='Alex',due_date='2026-11-01',evidence='Please review this.')
+   self.assertTrue(created);again,created_again=app.add_action_item(mid,'Review the proposal',db,owner='Alex',due_date='2026-11-01',evidence='Please review this.')
+   self.assertEqual((aid,created_again),(again,False));row=db.execute('SELECT message_id,owner,due_date,evidence FROM action_items WHERE id=?',(aid,)).fetchone()
+   self.assertEqual((row['message_id'],row['owner'],row['due_date'],row['evidence']),(mid,'Alex','2026-11-01','Please review this.'))
+   with self.assertRaises(ValueError):app.add_action_item(mid,'Bad date',db,due_date='2026-02-30')
+   db.close()
+ def test_full_json_export_and_confirmed_delete_all(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td);source=root/'mail.eml';source.write_text('From: a@example.test\nSubject: privacy\nMessage-ID: <privacy>\n\nTODO: Keep this synthetic',encoding='utf-8')
+   db=app.connect(root/'mail.db');mid,_=app.import_eml(source,db);app.extract_actions(mid,db);db.execute('INSERT INTO drafts(message_id,body,created_at) VALUES(?,?,?)',(mid,'Synthetic draft','now'));db.commit();db.close()
+   export=root/'all.json';run=subprocess.run([sys.executable,'app.py','--db',str(root/'mail.db'),'export',str(export),'--format','json'],capture_output=True,text=True)
+   self.assertEqual(run.returncode,0,run.stderr);payload=json.loads(export.read_text(encoding='utf-8'))
+   self.assertEqual(len(payload['messages']),1);self.assertEqual(len(payload['action_items']),1);self.assertEqual(len(payload['drafts']),1)
+   no_confirm=subprocess.run([sys.executable,'app.py','--db',str(root/'mail.db'),'delete-all'],capture_output=True,text=True)
+   self.assertNotEqual(no_confirm.returncode,0)
+   deleted=subprocess.run([sys.executable,'app.py','--db',str(root/'mail.db'),'delete-all','--confirm'],capture_output=True,text=True)
+   self.assertEqual(deleted.returncode,0,deleted.stderr);check=app.connect(root/'mail.db')
+   self.assertEqual(check.execute('SELECT COUNT(*) FROM messages').fetchone()[0],0);self.assertEqual(check.execute('SELECT COUNT(*) FROM drafts').fetchone()[0],0);check.close()
  def test_provider_pagination_checkpoint_and_restart_deduplication(self):
   raw1=b'From: a@example.test\nSubject: First\nMessage-ID: <first@example.test>\n\nOne'
   raw2=b'From: a@example.test\nSubject: Reply\nMessage-ID: <reply@example.test>\nIn-Reply-To: <first@example.test>\nReferences: <first@example.test>\n\nTwo'

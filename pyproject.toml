@@ -20,7 +20,7 @@ dev = ["ruff>=0.17,<1"]
 inbox-autopilot = "app:main"
 
 [tool.setuptools]
-py-modules = ["app", "gmail_provider", "migrations"]
+py-modules = ["app", "gmail_provider", "gmail_imap_provider", "migrations"]
 
 [tool.ruff]
 line-length = 100

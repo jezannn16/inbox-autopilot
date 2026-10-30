@@ -73,6 +73,22 @@ def sync_gmail(credentials_path: Path, token_path: Path, db: sqlite3.Connection,
     service=authorize_gmail(credentials_path,token_path)
     return sync_readonly(GmailProvider(service,query=query),db,max_pages=max_pages)
 
+def sync_gmail_imap(db: sqlite3.Connection, username: str | None = None,
+                    password: str | None = None, max_pages: int = 10,
+                    page_size: int = 50, initial_window_uids: int = 1000) -> tuple[int, int]:
+    import os
+    from gmail_imap_provider import GmailIMAPProvider
+    username = username or os.environ.get('GMAIL_IMAP_USERNAME', '')
+    password = password or os.environ.get('GMAIL_IMAP_APP_PASSWORD', '')
+    if not username or not password:
+        raise ValueError('Set GMAIL_IMAP_USERNAME and GMAIL_IMAP_APP_PASSWORD, or use --prompt-password')
+    if max_pages < 1:
+        raise ValueError('Maximum page count must be positive')
+    provider = GmailIMAPProvider(username, password, page_size=page_size,
+                                 initial_window_uids=initial_window_uids)
+    total = sync_readonly(provider, db, max_pages=max_pages)
+    return total, provider.skipped_oversize
+
 def suggest_reply(message_id: int, db: sqlite3.Connection) -> str:
     row=db.execute('SELECT subject FROM messages WHERE id=?',(message_id,)).fetchone()
     if row is None:raise ValueError('Message not found')
@@ -96,21 +112,58 @@ def extract_actions(message_id: int, db: sqlite3.Connection) -> int:
         count+=1
     db.commit(); return count
 
+def add_action_item(message_id: int, action: str, db: sqlite3.Connection,
+                    owner: str | None = None, due_date: str | None = None,
+                    evidence: str = '') -> tuple[int, bool]:
+    """Save a reviewed action with a link to its source message and evidence."""
+    if db.execute('SELECT 1 FROM messages WHERE id=?', (message_id,)).fetchone() is None:
+        raise ValueError('Message not found')
+    action = action.strip()
+    if not action or len(action) > 500:
+        raise ValueError('Action must contain 1–500 characters')
+    if owner is not None and (not owner.strip() or len(owner) > 100):
+        raise ValueError('Owner must contain 1–100 characters when provided')
+    if due_date is not None:
+        try:
+            due_date = datetime.strptime(due_date, '%Y-%m-%d').date().isoformat()
+        except ValueError:
+            raise ValueError('Due date must be a real date in YYYY-MM-DD format') from None
+    evidence = evidence.strip()[:1000]
+    if not evidence:
+        evidence = action
+    cur = db.execute('INSERT OR IGNORE INTO action_items(message_id,action,owner,due_date,confidence,evidence) VALUES(?,?,?,?,?,?)',
+                     (message_id, action, owner.strip() if owner else None, due_date, 1.0, evidence))
+    row = db.execute('SELECT id FROM action_items WHERE message_id=? AND action=? AND evidence=?',
+                     (message_id, action, evidence)).fetchone()
+    db.commit()
+    return int(row['id']), cur.rowcount == 1
+
 def main() -> None:
     p=argparse.ArgumentParser(description='Local .eml inbox organizer (read-only; no sending)')
     p.add_argument('--db',type=Path,default=DB); sub=p.add_subparsers(dest='cmd',required=True)
     i=sub.add_parser('import'); i.add_argument('file',type=Path)
     l=sub.add_parser('list'); l.add_argument('--query',default='')
     e=sub.add_parser('extract'); e.add_argument('message_id',type=int)
+    ac=sub.add_parser('action-add',help='Save a reviewed action linked to a source message')
+    ac.add_argument('message_id',type=int); ac.add_argument('action'); ac.add_argument('--owner'); ac.add_argument('--due'); ac.add_argument('--evidence',default='')
+    al=sub.add_parser('actions'); al.add_argument('--message-id',type=int)
+    dl=sub.add_parser('drafts'); dl.add_argument('--message-id',type=int)
     th=sub.add_parser('thread'); th.add_argument('message_id',type=int)
     d=sub.add_parser('draft'); d.add_argument('message_id',type=int); d.add_argument('text',nargs='?'); d.add_argument('--suggest',action='store_true')
-    x=sub.add_parser('export'); x.add_argument('file',type=Path)
+    x=sub.add_parser('export'); x.add_argument('file',type=Path); x.add_argument('--format',choices=('csv','json'),default='csv')
     rm=sub.add_parser('delete'); rm.add_argument('message_id',type=int); rm.add_argument('--confirm',action='store_true')
+    da=sub.add_parser('delete-all',help='Delete all locally stored mail data and sync checkpoints'); da.add_argument('--confirm',action='store_true')
     g=sub.add_parser('sync-gmail',help='Read messages from Gmail using local, read-only OAuth')
     g.add_argument('--credentials',type=Path,default=Path.home()/'.config/inbox-autopilot/credentials.json')
     g.add_argument('--token',type=Path,default=Path.home()/'.config/inbox-autopilot/token.json')
     g.add_argument('--query',default='in:inbox',help='Gmail search query (default: in:inbox)')
     g.add_argument('--max-pages',type=int,default=10,help='Maximum pages per run (100 messages per page)')
+    gi=sub.add_parser('sync-gmail-imap',help='Optional Gmail read-only IMAP sync via a local app password')
+    gi.add_argument('--username',help='Full Gmail address (or GMAIL_IMAP_USERNAME)')
+    gi.add_argument('--prompt-password',action='store_true',help='Read the app password with terminal input; it is not saved')
+    gi.add_argument('--max-pages',type=int,default=10)
+    gi.add_argument('--page-size',type=int,default=50)
+    gi.add_argument('--initial-window-uids',type=int,default=1000)
     a=p.parse_args(); db=connect(a.db)
     if a.cmd=='import':
         mid,new=import_eml(a.file,db); print(json.dumps({'id':mid,'imported':new},ensure_ascii=False))
@@ -119,6 +172,15 @@ def main() -> None:
         print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
     elif a.cmd=='extract':
         extract_actions(a.message_id,db); print(json.dumps([dict(r) for r in db.execute('SELECT * FROM action_items WHERE message_id=?',(a.message_id,))],ensure_ascii=False,indent=2))
+    elif a.cmd=='action-add':
+        action_id,created=add_action_item(a.message_id,a.action,db,a.owner,a.due,a.evidence)
+        print(json.dumps({'id':action_id,'created':created,'source_message_id':a.message_id},ensure_ascii=False))
+    elif a.cmd=='actions':
+        rows=db.execute('SELECT a.*,m.subject,m.sender FROM action_items a JOIN messages m ON m.id=a.message_id '+('WHERE a.message_id=? ' if a.message_id else '')+'ORDER BY a.id DESC', (a.message_id,) if a.message_id else ()).fetchall()
+        print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
+    elif a.cmd=='drafts':
+        rows=db.execute('SELECT d.id,d.message_id,d.body,d.created_at,m.thread_key,m.subject FROM drafts d JOIN messages m ON m.id=d.message_id '+('WHERE d.message_id=? ' if a.message_id else '')+'ORDER BY d.id DESC', (a.message_id,) if a.message_id else ()).fetchall()
+        print(json.dumps([dict(r) for r in rows],ensure_ascii=False,indent=2))
     elif a.cmd=='thread':
         row=db.execute('SELECT thread_key FROM messages WHERE id=?',(a.message_id,)).fetchone()
         if row is None:p.error('Message not found')
@@ -132,15 +194,37 @@ def main() -> None:
         if not a.confirm: p.error('Repeat with --confirm to delete the message and related local records')
         cur=db.execute('DELETE FROM messages WHERE id=?',(a.message_id,)); db.commit()
         print('Deleted' if cur.rowcount else 'Message not found')
+    elif a.cmd=='delete-all':
+        if not a.confirm: p.error('Repeat with --confirm to delete all local messages, drafts, actions, accounts and sync state')
+        counts={table:db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] for table in ('messages','action_items','drafts','threads','accounts','sync_state')}
+        db.execute('DELETE FROM action_items'); db.execute('DELETE FROM drafts'); db.execute('DELETE FROM messages')
+        db.execute('DELETE FROM threads'); db.execute('DELETE FROM accounts'); db.execute('DELETE FROM sync_state'); db.commit()
+        print(json.dumps({'deleted':counts},ensure_ascii=False))
     elif a.cmd=='export':
-        rows=db.execute('SELECT id,message_id,sender,subject,sent_at,body FROM messages ORDER BY id').fetchall()
-        with a.file.open('w',encoding='utf-8',newline='') as f:
-            w=csv.DictWriter(f,fieldnames=rows[0].keys() if rows else ['id','message_id','sender','subject','sent_at','body']);w.writeheader();w.writerows(map(dict,rows))
-        print(f'Exported {len(rows)} message(s).')
+        if a.format=='json':
+            payload={name:[dict(r) for r in db.execute(f'SELECT * FROM {name} ORDER BY rowid')]
+                     for name in ('accounts','threads','messages','action_items','drafts','sync_state')}
+            a.file.write_text(json.dumps(payload,ensure_ascii=False,indent=2),encoding='utf-8')
+            print(f"Exported {sum(len(rows) for rows in payload.values())} local record(s) as JSON.")
+        else:
+            rows=db.execute('SELECT id,message_id,sender,subject,sent_at,body FROM messages ORDER BY id').fetchall()
+            with a.file.open('w',encoding='utf-8',newline='') as f:
+                w=csv.DictWriter(f,fieldnames=rows[0].keys() if rows else ['id','message_id','sender','subject','sent_at','body']);w.writeheader();w.writerows(map(dict,rows))
+            print(f'Exported {len(rows)} message(s) as CSV; use --format json for related local records.')
     elif a.cmd=='sync-gmail':
         if a.max_pages < 1: p.error('--max-pages must be positive')
         try: total=sync_gmail(a.credentials,a.token,db,a.query,a.max_pages)
         except (FileNotFoundError,ValueError,RuntimeError) as exc: p.error(str(exc))
         print(json.dumps({'provider':'gmail','messages_seen':total,'query':a.query},ensure_ascii=False))
+    elif a.cmd=='sync-gmail-imap':
+        import getpass,os
+        if a.max_pages < 1:p.error('--max-pages must be positive')
+        username=a.username or os.environ.get('GMAIL_IMAP_USERNAME','')
+        password=os.environ.get('GMAIL_IMAP_APP_PASSWORD','')
+        if not password and a.prompt_password:
+            password=getpass.getpass('Gmail app password (input hidden; not saved): ')
+        try:total,skipped=sync_gmail_imap(db,username,password,a.max_pages,a.page_size,a.initial_window_uids)
+        except (ValueError,RuntimeError) as exc:p.error(str(exc))
+        print(json.dumps({'provider':'gmail-imap','messages_seen':total,'oversize_skipped':skipped,'mailbox':'INBOX'},ensure_ascii=False))
     db.close()
 if __name__=='__main__': main()
