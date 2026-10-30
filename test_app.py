@@ -11,6 +11,30 @@ class InboxTests(unittest.TestCase):
    self.assertEqual(r['action'],'Send the agenda');self.assertEqual(r['owner'],'Alex');self.assertEqual(r['due_date'],'2026-11-01');db.close()
  def test_empty_message_body_is_valid(self):
   self.assertEqual(app.parse_eml(b'Subject: Empty\n\n')['body'],'')
+ def test_html_only_eml_is_safely_converted_to_plain_text(self):
+  raw=(b'From: sender@example.test\nSubject: HTML only\nContent-Type: text/html; charset=utf-8\n\n'
+       b'<html><head><title>hidden</title><style>.x{color:red}</style></head><body>'
+       b'<p>Please review &amp; confirm.</p><script>stealCredentials()</script>'
+       b'<div>Second line</div></body></html>')
+  parsed=app.parse_eml(raw)
+  self.assertIn('Please review & confirm.',parsed['body'])
+  self.assertIn('Second line',parsed['body'])
+  self.assertNotIn('hidden',parsed['body'])
+  self.assertNotIn('color:red',parsed['body'])
+  self.assertNotIn('stealCredentials',parsed['body'])
+  self.assertNotIn('<p>',parsed['body'])
+ def test_plain_text_alternative_takes_precedence_over_html_and_attachment_is_ignored(self):
+  raw=(b'From: sender@example.test\nSubject: Alternatives\nMIME-Version: 1.0\n'
+       b'Content-Type: multipart/mixed; boundary="outer"\n\n'
+       b'--outer\nContent-Type: multipart/alternative; boundary="inner"\n\n'
+       b'--inner\nContent-Type: text/plain; charset=utf-8\n\nPlain version\n'
+       b'--inner\nContent-Type: text/html; charset=utf-8\n\n<p>HTML version</p>\n'
+       b'--inner--\n--outer\nContent-Type: text/html; name="attachment.html"\n'
+       b'Content-Disposition: attachment; filename="attachment.html"\n\n<p>Attachment content</p>\n--outer--\n')
+  body=app.parse_eml(raw)['body']
+  self.assertIn('Plain version',body)
+  self.assertNotIn('HTML version',body)
+  self.assertNotIn('Attachment content',body)
  def test_extract_actions_russian_english_and_untrusted_text_without_guessing(self):
   with tempfile.TemporaryDirectory() as td:
    db=app.connect(Path(td)/'mail.db')

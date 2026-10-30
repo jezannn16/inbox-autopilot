@@ -136,7 +136,7 @@ For a human-reviewed action, use `action-add MESSAGE_ID 'Action' --owner 'Name' 
 
 - SQLite stores full plain-text message bodies. Choose a protected local path and handle backups/exports as private email data. `export --format json` includes accounts, threads, messages, actions, drafts, and sync checkpoints; CSV remains a message-only export.
 - `delete-all --confirm` removes all locally stored mail records and sync state. It does not revoke the separate Google OAuth grant or Gmail App password; revoke either in Google Account settings if needed.
-- Attachments are ignored by the parser; they are never executed. Gmail raw messages are fetched for parsing, but attachment parts are excluded from the stored body.
+- Attachments are ignored by the parser; they are never executed. Plain-text message bodies take precedence; HTML-only messages are converted locally to plain text, with script, style, head, and template content omitted. Gmail raw messages are fetched for parsing, but attachment parts are excluded from the stored body.
 - Gmail sync is explicit and read-only. The IMAP app password is not stored in SQLite, but it grants the broader IMAP access Google documents; the adapter uses read-only mailbox selection and `BODY.PEEK`. There is no automatic background sync, LLM, or sending feature.
 - The OAuth refresh token is a credential. Keep `credentials.json` and `token.json` outside Git, restrict access to your account, and revoke the app's Google Account access when it is no longer needed.
 - Google can revoke App passwords when the account password changes; eligibility depends on account security settings and Workspace policy. If Google does not offer App passwords, use the API OAuth route or continue with `.eml` imports.

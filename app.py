@@ -1,6 +1,7 @@
 """Local, read-only email organizer. It never sends email or executes attachments."""
 from __future__ import annotations
 import argparse, csv, email, email.policy, hashlib, json, re, sqlite3
+from html.parser import HTMLParser
 from typing import Protocol, Sequence
 from migrations import connect as connect_db
 from datetime import datetime, timezone
@@ -9,12 +10,60 @@ from pathlib import Path
 
 DB = Path(__file__).with_name('inbox.sqlite3')
 
+
+class _HTMLTextExtractor(HTMLParser):
+    """Convert HTML message bodies to plain text without loading or executing resources."""
+    _SKIP = {'script', 'style', 'head', 'noscript', 'template'}
+    _BLOCK = {'address', 'article', 'blockquote', 'br', 'dd', 'div', 'dl', 'dt', 'h1', 'h2',
+              'h3', 'h4', 'h5', 'h6', 'hr', 'li', 'main', 'ol', 'p', 'pre', 'section', 'table',
+              'tr', 'ul'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts=[]
+        self.skipped=[]
+
+    def handle_starttag(self, tag, attrs):
+        if self.skipped:
+            if tag in self._SKIP:self.skipped.append(tag)
+            return
+        if tag in self._SKIP:
+            self.skipped.append(tag)
+        elif tag in self._BLOCK:
+            self.parts.append('\n')
+
+    def handle_endtag(self, tag):
+        if self.skipped:
+            if tag == self.skipped[-1]:self.skipped.pop()
+        elif tag in self._BLOCK:
+            self.parts.append('\n')
+
+    def handle_data(self, data):
+        if not self.skipped:self.parts.append(data)
+
+    def text(self):
+        text=''.join(self.parts).replace('\xa0',' ')
+        lines=[re.sub(r'[\t\f\v ]+',' ',line).strip() for line in text.splitlines()]
+        compact=[]
+        for line in lines:
+            if line:compact.append(line)
+            elif compact and compact[-1] != '':compact.append('')
+        return '\n'.join(compact).strip()
+
+
+def html_to_text(value: str) -> str:
+    parser=_HTMLTextExtractor()
+    parser.feed(value)
+    parser.close()
+    return parser.text()
+
 def connect(path: Path = DB) -> sqlite3.Connection:
     return connect_db(path)
 
 def parse_eml(raw: bytes) -> dict:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     body_parts=[]
+    html_parts=[]
     if msg.is_multipart():
         for part in msg.walk():
             if part.get_content_disposition() == 'attachment':
@@ -22,9 +71,17 @@ def parse_eml(raw: bytes) -> dict:
             if part.get_content_type() == 'text/plain':
                 try: body_parts.append(part.get_content())
                 except (LookupError, UnicodeDecodeError): pass
+            elif part.get_content_type() == 'text/html':
+                try: html_parts.append(part.get_content())
+                except (LookupError, UnicodeDecodeError): pass
     elif msg.get_content_type() == 'text/plain':
         try: body_parts.append(msg.get_content())
         except (LookupError, UnicodeDecodeError): pass
+    elif msg.get_content_type() == 'text/html':
+        try: html_parts.append(msg.get_content())
+        except (LookupError, UnicodeDecodeError): pass
+    if not body_parts:
+        body_parts=[html_to_text(str(part)) for part in html_parts]
     body='\n'.join(str(x) for x in body_parts).strip()
     date=''
     if msg.get('Date'):
