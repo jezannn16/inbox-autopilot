@@ -11,6 +11,18 @@ class InboxTests(unittest.TestCase):
    self.assertEqual(r['action'],'Send the agenda');self.assertEqual(r['owner'],'Alex');self.assertEqual(r['due_date'],'2026-11-01');db.close()
  def test_empty_message_body_is_valid(self):
   self.assertEqual(app.parse_eml(b'Subject: Empty\n\n')['body'],'')
+ def test_duplicate_message_id_with_changed_thread_headers_does_not_leave_orphan(self):
+  with tempfile.TemporaryDirectory() as td:
+   db=app.connect(Path(td)/'mail.db')
+   first=b'Message-ID: <same@example.test>\nSubject: first\n\nOriginal'
+   changed=b'Message-ID: <same@example.test>\nReferences: <different@example.test>\nSubject: changed\n\nDifferent'
+   original_id,created=app.store_message(first,db);duplicate_id,created_again=app.store_message(changed,db)
+   self.assertTrue(created);self.assertFalse(created_again);self.assertEqual(original_id,duplicate_id)
+   self.assertEqual(db.execute('SELECT COUNT(*) FROM threads').fetchone()[0],1)
+   db.close()
+   run=subprocess.run([sys.executable,'app.py','--db',str(Path(td)/'mail.db'),'delete',str(original_id),'--confirm'],capture_output=True,text=True)
+   self.assertEqual(run.returncode,0,run.stderr)
+   check=app.connect(Path(td)/'mail.db');self.assertEqual(check.execute('SELECT COUNT(*) FROM threads').fetchone()[0],0);check.close()
  def test_manual_action_is_validated_deduplicated_and_keeps_source(self):
   with tempfile.TemporaryDirectory() as td:
    f=Path(td)/'mail.eml';f.write_text('From: a@example.test\nSubject: Review\n\nPlease review this.',encoding='utf-8')

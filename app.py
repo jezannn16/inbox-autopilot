@@ -35,6 +35,13 @@ def parse_eml(raw: bytes) -> dict:
 
 def store_message(raw: bytes, db: sqlite3.Connection) -> tuple[int,bool]:
     fields=parse_eml(raw)
+    # Resolve identities before creating a thread: a duplicate Message-ID may
+    # have changed headers and must not leave orphaned thread metadata behind.
+    if fields['message_id']:
+        existing=db.execute('SELECT id FROM messages WHERE message_id=?',(fields['message_id'],)).fetchone()
+        if existing:return int(existing['id']),False
+    existing=db.execute('SELECT id FROM messages WHERE fingerprint=?',(fields['fingerprint'],)).fetchone()
+    if existing:return int(existing['id']),False
     refs=re.findall(r'<[^>]+>',fields['references'])
     thread_key=refs[0] if refs else fields['in_reply_to'] or fields['message_id'] or fields['fingerprint']
     db.execute('INSERT OR IGNORE INTO threads(thread_key,subject,created_at) VALUES(?,?,?)',(thread_key,fields['subject'],datetime.now(timezone.utc).isoformat()))
@@ -192,7 +199,10 @@ def main() -> None:
         db.execute('INSERT INTO drafts(message_id,body,created_at) VALUES(?,?,?)',(a.message_id,text,datetime.now(timezone.utc).isoformat())); db.commit(); print('Draft saved locally. Sending is not implemented.')
     elif a.cmd=='delete':
         if not a.confirm: p.error('Repeat with --confirm to delete the message and related local records')
-        cur=db.execute('DELETE FROM messages WHERE id=?',(a.message_id,)); db.commit()
+        cur=db.execute('DELETE FROM messages WHERE id=?',(a.message_id,))
+        if cur.rowcount:
+            db.execute('DELETE FROM threads WHERE thread_key NOT IN (SELECT DISTINCT thread_key FROM messages WHERE thread_key IS NOT NULL)')
+        db.commit()
         print('Deleted' if cur.rowcount else 'Message not found')
     elif a.cmd=='delete-all':
         if not a.confirm: p.error('Repeat with --confirm to delete all local messages, drafts, actions, accounts and sync state')
