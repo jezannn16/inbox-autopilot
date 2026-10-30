@@ -73,7 +73,7 @@ The API sync remains optional. Install the Gmail client libraries with the proje
 .venv/bin/python -m pip install -e '.[gmail]'
 ```
 
-The API path asks Google only for `https://www.googleapis.com/auth/gmail.readonly`; it requires a user-configured Cloud project and OAuth client. This scope lets the app read mail, so keep the local token private.
+The API path asks Google only for `https://www.googleapis.com/auth/gmail.readonly`; it requires a user-configured Cloud project and OAuth client. This scope lets the app read mail, so keep the local token private. Gmail API requests use TLS with a 20-second HTTP timeout and the client library's bounded exponential retries (2 by default, configurable from 0 to 5 in the provider); sync still resumes through the persisted page token after a per-run page ceiling.
 
 1. In a Google Cloud project you control, enable the Gmail API and configure the OAuth consent screen. For a personal test, use the testing audience and add your own Google account as a test user.
 2. Create an OAuth client with application type **Desktop app** and download its JSON file. These are user-created Google Cloud settings; this repository does not create cloud resources.

@@ -9,6 +9,7 @@ from typing import Any
 
 GMAIL_READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
 MAX_RAW_MESSAGE_BYTES = 10_000_000
+GMAIL_HTTP_TIMEOUT = 20
 
 
 class GmailProvider:
@@ -16,21 +17,31 @@ class GmailProvider:
 
     name = 'gmail'
 
-    def __init__(self, service: Any, query: str = 'in:inbox', page_size: int = 100):
+    def __init__(self, service: Any, query: str = 'in:inbox', page_size: int = 100,
+                 max_retries: int = 2):
+        if not 0 <= max_retries <= 5:
+            raise ValueError('Gmail API retries must be between 0 and 5')
         self.service = service
         self.query = query
         self.page_size = page_size
+        self.max_retries = max_retries
+
+    def _execute(self, request):
+        # googleapiclient applies bounded exponential backoff for retryable
+        # HTTP/transport errors when num_retries is provided.
+        return request.execute(num_retries=self.max_retries)
 
     def fetch_page(self, checkpoint: str | None):
         params = {'userId': 'me', 'q': self.query, 'maxResults': self.page_size}
         if checkpoint:
             params['pageToken'] = checkpoint
-        page = self.service.users().messages().list(**params).execute()
+        page = self._execute(self.service.users().messages().list(**params))
         raw_messages = []
         for item in page.get('messages', []):
             message = self.service.users().messages().get(
                 userId='me', id=item['id'], format='raw'
-            ).execute()
+            )
+            message = self._execute(message)
             raw = base64.urlsafe_b64decode(message['raw'] + '=' * (-len(message['raw']) % 4))
             if len(raw) > MAX_RAW_MESSAGE_BYTES:
                 raise ValueError('A Gmail message exceeds the 10 MB import limit; no data was stored for it')
@@ -105,6 +116,9 @@ def authorize_gmail(credentials_path: Path, token_path: Path):
 
     _save_token(token_path, credentials.to_json())
     try:
-        return build('gmail', 'v1', credentials=credentials, cache_discovery=False)
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+        http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=GMAIL_HTTP_TIMEOUT))
+        return build('gmail', 'v1', http=http, cache_discovery=False)
     except Exception:
         raise RuntimeError('Could not initialize the Gmail API client') from None

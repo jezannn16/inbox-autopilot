@@ -7,15 +7,15 @@ from types import ModuleType
 from unittest.mock import patch
 
 import app
-from gmail_provider import GMAIL_READONLY_SCOPE, GmailProvider, authorize_gmail
+from gmail_provider import GMAIL_HTTP_TIMEOUT, GMAIL_READONLY_SCOPE, GmailProvider, authorize_gmail
 
 
 class FakeRequest:
     def __init__(self, service, method, **params):
         self.service, self.method, self.params = service, method, params
 
-    def execute(self):
-        self.service.calls.append((self.method, self.params))
+    def execute(self, num_retries=0):
+        self.service.calls.append((self.method, self.params, num_retries))
         if self.method == 'list':
             if self.params.get('pageToken') == 'page-2':
                 return {'messages': [{'id': 'second'}]}
@@ -68,12 +68,21 @@ class GmailTests(unittest.TestCase):
             first = db.execute('SELECT id FROM messages WHERE subject=?', ('First',)).fetchone()
             self.assertEqual(app.extract_actions(first['id'], db), 1)
             self.assertEqual(db.execute('SELECT checkpoint FROM sync_state').fetchone()[0], None)
-            requests = [method for method, _ in service.calls]
+            requests = [method for method, _, _ in service.calls]
             self.assertEqual(requests, ['list', 'get', 'list', 'get'])
             self.assertTrue(all(method in {'list', 'get'} for method in requests))
-            get_params = [params for method, params in service.calls if method == 'get']
+            get_params = [params for method, params, retries in service.calls if method == 'get']
             self.assertTrue(all(params['format'] == 'raw' for params in get_params))
+            self.assertTrue(all(retries == 2 for _, _, retries in service.calls))
             db.close()
+
+    def test_retry_count_is_bounded_and_configurable(self):
+        service=FakeGmailService()
+        provider=GmailProvider(service,max_retries=1)
+        provider.fetch_page(None)
+        self.assertTrue(all(retries==1 for _,_,retries in service.calls))
+        with self.assertRaisesRegex(ValueError,'between 0 and 5'):
+            GmailProvider(service,max_retries=6)
 
     def test_desktop_oauth_requests_only_readonly_and_saves_private_token(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -117,18 +126,25 @@ class GmailTests(unittest.TestCase):
                 'google.auth.transport.requests', 'google.oauth2',
                 'google.oauth2.credentials', 'google_auth_oauthlib',
                 'google_auth_oauthlib.flow', 'googleapiclient',
-                'googleapiclient.discovery',
+                'googleapiclient.discovery', 'google_auth_httplib2', 'httplib2',
             )}
             modules['google.auth.transport.requests'].Request = object
             modules['google.oauth2.credentials'].Credentials = Credentials
             modules['google_auth_oauthlib.flow'].InstalledAppFlow = Flow
             modules['googleapiclient.discovery'].build = build
+            class Http:
+                def __init__(self, timeout): observed['http_timeout']=timeout
+            class AuthorizedHttp:
+                def __init__(self, credentials, http): observed['authorized_http']=(credentials,http)
+            modules['google_auth_httplib2'].AuthorizedHttp=AuthorizedHttp
+            modules['httplib2'].Http=Http
             with patch.dict('sys.modules', modules):
                 self.assertIs(authorize_gmail(client_file, token_file), built)
 
             self.assertEqual(observed['flow'][1], [GMAIL_READONLY_SCOPE])
             self.assertEqual(observed['browser_flow'], {'port': 0, 'access_type': 'offline'})
             self.assertEqual(observed['build'][:2], ('gmail', 'v1'))
+            self.assertEqual(observed['http_timeout'],GMAIL_HTTP_TIMEOUT)
             self.assertEqual(token_file.read_text(encoding='utf-8'), '{"token":"synthetic-token"}')
             self.assertEqual(os.stat(token_file).st_mode & 0o777, 0o600)
             self.assertEqual(os.stat(token_file.parent).st_mode & 0o777, 0o700)
